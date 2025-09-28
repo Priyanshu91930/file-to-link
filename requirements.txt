@@ -1,3 +1,2 @@
-python-telegram-bot==21.0.1
-# Add your cloud storage library here, e.g., for AWS S3:
-# boto3
+python-telegram-bot[webhooks]==21.0.1
+pysftp==0.2.9
