@@ -35,9 +35,8 @@ def load_channels() -> list:
 def save_channels(channels: list):
     with open(CHANNELS_FILE, "w") as f: json.dump(channels, f, indent=4)
 
-# --- NEW: Real Upload Function with Detailed Errors ---
+# --- Real Upload Function with Detailed Errors ---
 def upload_file_to_hosting(local_path: str, remote_filename: str) -> str:
-    # Check for missing environment variables first
     missing_vars = []
     if not SFTP_HOST: missing_vars.append("FTP_HOST")
     if not SFTP_USER: missing_vars.append("FTP_USER")
@@ -48,7 +47,7 @@ def upload_file_to_hosting(local_path: str, remote_filename: str) -> str:
     if missing_vars:
         error_message = f"Server hosting is misconfigured. Missing variables: {', '.join(missing_vars)}"
         logger.error(error_message)
-        raise ValueError(error_message) # Send this specific error to the user
+        raise ValueError(error_message)
 
     cnopts = pysftp.CnOpts()
     cnopts.hostkeys = None
@@ -77,30 +76,27 @@ def upload_file_to_hosting(local_path: str, remote_filename: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(f"Hi {update.effective_user.mention_html()}! Send me a file (under 20MB).")
 
-# --- NEW: Admin Command to Check Environment Variables ---
 async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != OWNER_ID:
-        return # Silently ignore for non-admins
+        return
 
-    # Check each variable and prepare a status message
-    status_list = []
-    status_list.append(f"BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ MISSING!'}")
-    status_list.append(f"WEBHOOK_URL: {f'✅ Set to {WEBHOOK_URL}' if WEBHOOK_URL else '❌ MISSING! (Running in polling mode)'}")
-    status_list.append(f"OWNER_ID: {f'✅ Set to {OWNER_ID}' if OWNER_ID else '❌ MISSING!'}")
-    status_list.append("-" * 20)
-    status_list.append(f"FTP_HOST: {f'✅ Set to {SFTP_HOST}' if SFTP_HOST else '❌ MISSING!'}")
-    status_list.append(f"FTP_USER: {f'✅ Set to {SFTP_USER}' if SFTP_USER else '❌ MISSING!'}")
-    status_list.append(f"FTP_PASS: {'✅ Set' if SFTP_PASS else '❌ MISSING!'}")
-    status_list.append(f"FTP_PATH: {f'✅ Set to {SFTP_PATH}' if SFTP_PATH else '❌ MISSING!'}")
-    status_list.append(f"PUBLIC_URL_BASE: {f'✅ Set to {PUBLIC_URL_BASE}' if PUBLIC_URL_BASE else '❌ MISSING!'}")
+    status_list = [
+        f"BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ MISSING!'}",
+        f"WEBHOOK_URL: {f'✅ Set to {WEBHOOK_URL}' if WEBHOOK_URL else '❌ MISSING! (Running in polling mode)'}",
+        f"OWNER_ID: {f'✅ Set to {OWNER_ID}' if OWNER_ID else '❌ MISSING!'}",
+        "-" * 20,
+        f"FTP_HOST: {f'✅ Set to {SFTP_HOST}' if SFTP_HOST else '❌ MISSING!'}",
+        f"FTP_USER: {f'✅ Set to {SFTP_USER}' if SFTP_USER else '❌ MISSING!'}",
+        f"FTP_PASS: {'✅ Set' if SFTP_PASS else '❌ MISSING!'}",
+        f"FTP_PATH: {f'✅ Set to {SFTP_PATH}' if SFTP_PATH else '❌ MISSING!'}",
+        f"PUBLIC_URL_BASE: {f'✅ Set to {PUBLIC_URL_BASE}' if PUBLIC_URL_BASE else '❌ MISSING!'}"
+    ]
     
-    await update.message.reply_text("
-```text
-Environment Variable Status:```
-\n" + "\n".join(status_list))
+    # --- THIS IS THE CORRECTED LINE ---
+    final_report = "Environment Variable Status:\n" + "\n".join(status_list)
+    await update.message.reply_text(final_report)
 
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (This function is unchanged)
     if update.effective_user.id != OWNER_ID: return
     if not context.args: await update.message.reply_text("Usage: /addchannel @username"); return
     channel = context.args[0]
@@ -111,7 +107,6 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else: await update.message.reply_text(f"{channel} is already in the list.")
 
 async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (This function is unchanged)
     if update.effective_user.id != OWNER_ID: return
     if not context.args: await update.message.reply_text("Usage: /delchannel @username"); return
     channel = context.args[0]
@@ -122,7 +117,6 @@ async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else: await update.message.reply_text(f"{channel} not found.")
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (This function is unchanged)
     if update.effective_user.id != OWNER_ID: return
     channels = load_channels()
     if channels: await update.message.reply_text("Required channels:\n" + "\n".join(channels))
@@ -130,9 +124,7 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- Media and Callback Handlers with Detailed Error Reporting ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (Force-subscribe logic is unchanged)
-    # ...
-
+    # (Force-subscribe logic here)
     message = update.message
     file, file_name = (message.video, message.video.file_name or f"video_{int(time.time())}.mp4") if message.video else (message.document, message.document.file_name or f"file_{int(time.time())}.bin")
     if not file: return
@@ -146,7 +138,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         direct_link = upload_file_to_hosting(temp_file_path, file_name)
         await processing_msg.edit_text(f"✅ Your direct link is ready:\n\n{direct_link}")
     
-    # --- MORE SPECIFIC ERROR HANDLING ---
     except ValueError as ve:
         await processing_msg.edit_text(f"🚫 Error: {ve}")
     except ConnectionRefusedError as cre:
@@ -158,7 +149,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if os.path.exists(temp_file_path): os.remove(temp_file_path)
 
 async def check_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (This function is unchanged)
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Thanks! Please send your file again.")
@@ -176,7 +166,6 @@ async def post_init(application: Application) -> None:
     logger.info("Custom bot commands set.")
 
 def main() -> None:
-    # --- NEW: Startup Environment Variable Checks ---
     if not BOT_TOKEN: logger.critical("FATAL: BOT_TOKEN is not set."); return
     if not OWNER_ID: logger.critical("FATAL: OWNER_ID is not set."); return
     if not WEBHOOK_URL: logger.warning("WARNING: WEBHOOK_URL not set. Bot will run in polling mode.")
@@ -189,7 +178,7 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("checkenv", check_env)) # Add the new command handler
+    application.add_handler(CommandHandler("checkenv", check_env))
     application.add_handler(CommandHandler("addchannel", add_channel))
     application.add_handler(CommandHandler("delchannel", del_channel))
     application.add_handler(CommandHandler("listchannels", list_channels))
