@@ -3,6 +3,7 @@ import logging
 import time
 import json
 import pysftp
+import asyncio # Import the asyncio library
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes,
@@ -10,35 +11,30 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
-# --- Configuration ---
+# --- Configuration and Setup (unchanged) ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", "8000"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-
-# --- SFTP Configuration ---
 SFTP_HOST = os.getenv("FTP_HOST")
 SFTP_USER = os.getenv("FTP_USER")
 SFTP_PASS = os.getenv("FTP_PASS")
 SFTP_PATH = os.getenv("FTP_PATH")
 PUBLIC_URL_BASE = os.getenv("PUBLIC_URL_BASE")
-
 CHANNELS_FILE = "channels.json"
 AWAITING_FORWARD = range(1)
-
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Channel Management ---
+# --- Helper Functions (unchanged) ---
 def load_channels():
     try:
         with open(CHANNELS_FILE, "r") as f: return json.load(f)
     except FileNotFoundError: return []
-
 def save_channels(channels):
     with open(CHANNELS_FILE, "w") as f: json.dump(channels, f, indent=4)
 
-# --- Upload Function ---
+# --- Upload Function (unchanged) ---
 def upload_file_with_progress(local_path: str, remote_filename: str, callback_func) -> str:
     missing_vars = [var for var, val in {"FTP_HOST": SFTP_HOST, "FTP_USER": SFTP_USER, "FTP_PASS": SFTP_PASS, "FTP_PATH": SFTP_PATH, "PUBLIC_URL_BASE": PUBLIC_URL_BASE}.items() if not val]
     if missing_vars:
@@ -54,10 +50,9 @@ def upload_file_with_progress(local_path: str, remote_filename: str, callback_fu
     except Exception as e:
         logger.error(f"SFTP upload failed: {e}", exc_info=True); raise e
 
-# --- Command Handlers ---
+# --- Command Handlers (unchanged) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(f"Hi {update.effective_user.mention_html()}! Send a file (under 20MB).")
-
 async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     status_list = [f"{k}: {'✅ Set' if v else '❌ MISSING!'}" for k, v in {
@@ -65,25 +60,18 @@ async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "FTP_USER": SFTP_USER, "FTP_PASS": SFTP_PASS, "FTP_PATH": SFTP_PATH, "PUBLIC_URL_BASE": PUBLIC_URL_BASE
     }.items()]
     await update.message.reply_text("Environment Variable Status:\n" + "\n".join(status_list))
-
-# --- Add Channel Conversation (FIXED) ---
 async def add_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return ConversationHandler.END
     await update.message.reply_text("To add a channel:\n1. Make me an admin there.\n2. Forward a message from the channel to me.\n\nSend /cancel to abort.")
     return AWAITING_FORWARD
-
 async def receive_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    # ** THE FIX IS HERE **
-    # We check the `forward_origin` property which is more reliable
     if not message.forward_origin or message.forward_origin.type != 'channel':
         await message.reply_text("That is not a valid forwarded message from a channel. Please try again or /cancel.")
         return AWAITING_FORWARD
-
     origin = message.forward_origin
     channel_id = f"@{origin.chat.username}" if origin.chat.username else origin.chat.id
     channel_title = origin.chat.title
-    
     try:
         member = await context.bot.get_chat_member(chat_id=channel_id, user_id=context.bot.id)
         if member.status != 'administrator':
@@ -92,22 +80,15 @@ async def receive_forwarded_message(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         await message.reply_text(f"Could not verify my status in '{channel_title}'. Error: {e}")
         return ConversationHandler.END
-
     channels = load_channels()
     if str(channel_id) not in channels:
-        channels.append(str(channel_id))
-        save_channels(channels)
+        channels.append(str(channel_id)); save_channels(channels)
         await message.reply_text(f"✅ Success! Channel '{channel_title}' has been added.")
     else:
         await message.reply_text(f"Channel '{channel_title}' is already in the list.")
-    
     return ConversationHandler.END
-
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operation cancelled.")
-    return ConversationHandler.END
-
-# (del_channel and list_channels are unchanged)
+    await update.message.reply_text("Operation cancelled."); return ConversationHandler.END
 async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     if not context.args: await update.message.reply_text("Usage: /delchannel @channel_username_or_id"); return
@@ -117,19 +98,18 @@ async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channels.remove(channel_to_delete); save_channels(channels)
         await update.message.reply_text(f"Removed '{channel_to_delete}'.")
     else: await update.message.reply_text(f"'{channel_to_delete}' not found.")
-
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
     channels = load_channels()
     if channels: await update.message.reply_text("Required channels:\n" + "\n".join(channels))
     else: await update.message.reply_text("No channels required.")
 
-# --- Media Handler ---
+# --- Media Handler (THIS IS THE FIXED PART) ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # (Force-subscribe logic remains the same)
     required_channels = load_channels()
     if required_channels:
-        user_id = update.effective_user.id
-        not_subscribed = []
+        user_id = update.effective_user.id; not_subscribed = []
         for channel in required_channels:
             try:
                 member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
@@ -151,7 +131,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def progress_callback(sent, total):
         current_time = time.time()
-        if current_time - last_update_time[0] < 2: return
+        if current_time - last_update_time[0] < 1.5: return # Update at most every 1.5 seconds
         percentage = int((sent / total) * 100)
         bar = '█' * int(percentage / 10) + '─' * (10 - int(percentage / 10))
         try:
@@ -162,11 +142,15 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         tg_file = await file.get_file()
         await tg_file.download_to_drive(temp_file_path)
-        
+
         def sync_progress_callback(sent, total):
             context.application.create_task(progress_callback(sent, total))
         
-        direct_link = upload_file_with_progress(temp_file_path, file_name, sync_progress_callback)
+        # *** THE FIX IS HERE: We run the blocking upload in a separate thread ***
+        direct_link = await asyncio.to_thread(
+            upload_file_with_progress, temp_file_path, file_name, sync_progress_callback
+        )
+        
         await processing_msg.edit_text(f"✅ Your direct link is ready:\n\n{direct_link}", parse_mode=None)
     except (ValueError, ConnectionRefusedError) as e:
         await processing_msg.edit_text(f"🚫 Error: {e}")
@@ -181,7 +165,7 @@ async def check_subscription_callback(update: Update, context: ContextTypes.DEFA
     await query.answer()
     await query.edit_message_text("Thanks! Please send your file again.")
 
-# --- Bot Initialization ---
+# --- Bot Initialization (unchanged) ---
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Start the bot"), BotCommand("checkenv", "Check variables (Admin)"),
@@ -189,7 +173,6 @@ async def post_init(application: Application):
         BotCommand("listchannels", "List channels (Admin)")
     ])
     logger.info("Custom bot commands set.")
-
 def main():
     if not BOT_TOKEN or not OWNER_ID:
         logger.critical("FATAL: BOT_TOKEN or OWNER_ID not set."); return
@@ -198,9 +181,7 @@ def main():
     
     add_channel_conv = ConversationHandler(
         entry_points=[CommandHandler("addchannel", add_channel_start)],
-        states={
-            AWAITING_FORWARD: [MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, receive_forwarded_message)]
-        },
+        states={ AWAITING_FORWARD: [MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, receive_forwarded_message)] },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
     )
     application.add_handler(add_channel_conv)
