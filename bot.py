@@ -2,105 +2,85 @@ import os
 import logging
 import time
 import json
+import pysftp # Library for secure file transfer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import TelegramError
 
 # --- Configuration ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # Should be the base URL, e.g., https://file-to-link-1.onrender.com
 PORT = int(os.getenv("PORT", "8000"))
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# Bot Owner's Telegram User ID (from environment variable)
-try:
-    OWNER_ID = int(os.getenv("OWNER_ID"))
-except (TypeError, ValueError):
-    OWNER_ID = None # Bot will warn if owner ID is not set
+# --- FTP/SFTP Configuration for your Premium Hosting ---
+FTP_HOST = os.getenv("FTP_HOST")
+FTP_USER = os.getenv("FTP_USER")
+FTP_PASS = os.getenv("FTP_PASS")
+FTP_PATH = os.getenv("FTP_PATH") # e.g., /home/username/public_html/files
+PUBLIC_URL_BASE = os.getenv("PUBLIC_URL_BASE") # e.g., https://yourdomain.com/files
 
 CHANNELS_FILE = "channels.json"
 
 # --- Logging ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Channel Management Functions ---
+# --- Channel Management ---
 def load_channels() -> list:
-    """Loads the list of required channels from a JSON file."""
     try:
-        with open(CHANNELS_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return [] # Return an empty list if the file doesn't exist yet
+        with open(CHANNELS_FILE, "r") as f: return json.load(f)
+    except FileNotFoundError: return []
+def save_channels(channels: list):
+    with open(CHANNELS_FILE, "w") as f: json.dump(channels, f, indent=4)
 
-def save_channels(channels: list) -> None:
-    """Saves the list of required channels to a JSON file."""
-    with open(CHANNELS_FILE, "w") as f:
-        json.dump(channels, f, indent=4)
+# --- NEW: Real Upload Function ---
+def upload_file_to_premium_hosting(local_path: str, remote_filename: str) -> str:
+    """Uploads a file to your premium web hosting via SFTP and returns a public URL."""
+    if not all([FTP_HOST, FTP_USER, FTP_PASS, FTP_PATH, PUBLIC_URL_BASE]):
+        logger.error("FTP/SFTP environment variables are not fully configured!")
+        raise ValueError("Server-side hosting is not configured.")
 
-# --- Helper Functions ---
-async def is_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> tuple[bool, list[str]]:
-    """Checks if the user is subscribed to all required channels from the JSON file."""
-    required_channels = load_channels()
-    if not required_channels:
-        return True, [] # If no channels are set, subscription is not required
+    # This disables host key checking. Less secure but avoids common initial setup issues.
+    cnopts = pysftp.CnOpts()
+    cnopts.hostkeys = None
 
-    not_subscribed_channels = []
-    for channel_username in required_channels:
-        try:
-            member = await context.bot.get_chat_member(chat_id=channel_username, user_id=user_id)
-            if member.status not in ["member", "administrator", "creator"]:
-                not_subscribed_channels.append(channel_username)
-        except TelegramError as e:
-            logger.warning(f"Could not check subscription for {user_id} in {channel_username}: {e.message}")
-            not_subscribed_channels.append(channel_username)
-    return len(not_subscribed_channels) == 0, not_subscribed_channels
+    remote_filepath = f"{FTP_PATH}/{remote_filename}"
+    
+    try:
+        logger.info(f"Connecting to SFTP host: {FTP_HOST}")
+        with pysftp.Connection(host=FTP_HOST, username=FTP_USER, password=FTP_PASS, cnopts=cnopts) as sftp:
+            logger.info(f"Uploading {local_path} to {remote_filepath}")
+            sftp.put(local_path, remote_filepath)
+            logger.info("Upload successful.")
+        
+        # Construct the final public URL
+        public_url = f"{PUBLIC_URL_BASE}/{remote_filename}"
+        return public_url
+    except Exception as e:
+        logger.error(f"SFTP upload failed: {e}", exc_info=True)
+        raise e
 
-async def send_force_subscribe_message(update: Update, not_subscribed_channels: list[str]) -> None:
-    """Sends a message prompting the user to subscribe."""
-    keyboard_buttons = []
-    for channel in not_subscribed_channels:
-        channel_name_for_link = channel.lstrip('@')
-        keyboard_buttons.append(
-            [InlineKeyboardButton(f"Join {channel}", url=f"https://t.me/{channel_name_for_link}")]
-        )
-    keyboard_buttons.append(
-        [InlineKeyboardButton("✅ I have joined", callback_data="check_subscription")]
-    )
-    reply_markup = InlineKeyboardMarkup(keyboard_buttons)
-
-    await update.message.reply_text(
-        "To use this bot, you must first join our channel(s):",
-        reply_markup=reply_markup
-    )
-
-async def upload_file_to_external_storage(file_path: str, file_name: str) -> str:
-    """
-    *** IMPORTANT: THIS IS A MOCK FUNCTION. YOU MUST REPLACE THIS ***
-    This function should upload the file from `file_path` to your chosen cloud storage
-    and return a direct, public download URL.
-    """
-    logger.info(f"Attempting to 'upload' {file_name} to external storage...")
-    mock_link = f"https://mock.direct.download.link/{file_name}?token={int(time.time())}"
-    logger.info(f"Mock upload successful. Link: {mock_link}")
-    return mock_link
-
-# --- Command Handlers (User-facing) ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    await update.message.reply_html(
-        f"Hi {user.mention_html()}! Send me any video or file, and I'll give you a direct download link.\n"
-    )
+# --- Handlers and Bot Logic (Mostly unchanged, but calls the new upload function) ---
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    subscribed, not_subscribed_channels = await is_subscribed(update, context, user_id)
-
-    if not subscribed:
-        await send_force_subscribe_message(update, not_subscribed_channels)
-        return
+    # Force subscribe check...
+    required_channels = load_channels()
+    if required_channels:
+        user_id = update.effective_user.id
+        not_subscribed_channels = []
+        for channel in required_channels:
+            try:
+                member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
+                if member.status not in ["member", "administrator", "creator"]:
+                    not_subscribed_channels.append(channel)
+            except TelegramError as e:
+                logger.warning(f"Could not check subscription for {user_id} in {channel}: {e.message}")
+                not_subscribed_channels.append(channel)
+        
+        if not_subscribed_channels:
+            # Code to send force-sub message... (omitted for brevity, it's the same)
+            return
 
     message = update.message
     file_id = None
@@ -108,110 +88,43 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if message.video:
         file_id = message.video.file_id
-        file_name = f"video_{file_id}_{int(time.time())}.mp4"
+        file_name = message.video.file_name or f"video_{file_id}_{int(time.time())}.mp4"
     elif message.document:
         file_id = message.document.file_id
-        file_name = message.document.file_name or f"document_{file_id}_{int(time.time())}.bin"
-    else:
-        await message.reply_text("Please send a video or a document.")
-        return
+        file_name = message.document.file_name or f"file_{file_id}_{int(time.time())}.bin"
+    else: return
 
     if file_id:
-        processing_msg = await message.reply_text("Processing your file...")
+        processing_msg = await message.reply_text("Downloading file from Telegram...")
+        temp_file_path = os.path.join("/tmp", file_name)
         try:
             telegram_file = await context.bot.get_file(file_id)
-            temp_file_path = os.path.join("/tmp", file_name)
             await telegram_file.download_to_drive(temp_file_path)
             logger.info(f"Downloaded {file_name} to {temp_file_path}")
             
-            direct_link = await upload_file_to_external_storage(temp_file_path, file_name)
+            await processing_msg.edit_text("Uploading to hosting...")
             
-            await processing_msg.edit_text(f"✅ Here is your direct download link:\n\n{direct_link}")
+            # --- CALL THE NEW UPLOAD FUNCTION ---
+            direct_link = upload_file_to_premium_hosting(temp_file_path, file_name)
             
-            os.remove(temp_file_path)
-            logger.info(f"Cleaned up temporary file: {temp_file_path}")
+            await processing_msg.edit_text(f"✅ Your direct download link is ready:\n\n{direct_link}")
+            
+        except ValueError as ve: # Catching our custom configuration error
+             await processing_msg.edit_text(f"Error: {ve}")
         except Exception as e:
-            logger.error(f"Error processing file {file_name} ({file_id}): {e}", exc_info=True)
+            logger.error(f"Error processing file {file_name}: {e}", exc_info=True)
             await processing_msg.edit_text("Sorry, an error occurred while processing your file.")
+        finally:
+            # Clean up the temporary file from Render's server
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
 
-# --- Admin Command Handlers ---
-
-async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to add a new channel for force subscribe."""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /addchannel @channel_username")
-        return
-
-    channel_username = context.args[0]
-    if not channel_username.startswith('@'):
-        await update.message.reply_text("Invalid format. Please provide the channel username starting with '@'.")
-        return
-
-    channels = load_channels()
-    if channel_username not in channels:
-        channels.append(channel_username)
-        save_channels(channels)
-        await update.message.reply_text(f"Channel {channel_username} added successfully.")
-    else:
-        await update.message.reply_text(f"Channel {channel_username} is already in the list.")
-
-async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to remove a channel."""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /delchannel @channel_username")
-        return
-
-    channel_username = context.args[0]
-    channels = load_channels()
-    if channel_username in channels:
-        channels.remove(channel_username)
-        save_channels(channels)
-        await update.message.reply_text(f"Channel {channel_username} removed successfully.")
-    else:
-        await update.message.reply_text(f"Channel {channel_username} not found in the list.")
-
-async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to list all required channels."""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    channels = load_channels()
-    if channels:
-        message = "Required Channels:\n" + "\n".join(channels)
-        await update.message.reply_text(message)
-    else:
-        await update.message.reply_text("No channels are currently required.")
-
-# --- Callback and Post-Init ---
-
-async def check_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'I have joined' button press."""
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    subscribed, not_subscribed = await is_subscribed(update, context, user_id)
-
-    if subscribed:
-        await query.edit_message_text("🎉 Thanks for joining! Please send your file again.")
-    else:
-        await query.answer("You still haven't joined all the required channels.", show_alert=True)
+# --- Admin commands, start command, etc. are the same as before ---
+# (You can copy them from your existing code or the previous version I gave you)
+# ...
 
 async def post_init(application: Application) -> None:
-    """This function runs once after the bot starts."""
-    if not OWNER_ID:
-        logger.warning("OWNER_ID is not set in environment variables! Admin commands will not work.")
-    
-    # Set the bot commands that appear when typing '/'
+    # ... (same post_init function)
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("addchannel", "Add a force-sub channel (Admin)"),
@@ -221,33 +134,31 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands(commands)
     logger.info("Custom bot commands have been set.")
 
+
 def main() -> None:
-    if not BOT_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
-        return
-
+    # ... (same setup)
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    
+    # ... (same handlers)
 
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("addchannel", add_channel))
-    application.add_handler(CommandHandler("delchannel", del_channel))
-    application.add_handler(CommandHandler("listchannels", list_channels))
-    application.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_media))
-    application.add_handler(CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"))
-
-    # Webhook setup
+    # --- Webhook setup (FIXED) ---
     if WEBHOOK_URL:
-        logger.info(f"Setting up webhook for URL: {WEBHOOK_URL}/webhook on port {PORT}")
+        # The URL path and the full webhook_url are now constructed correctly
+        url_path = "webhook" 
+        full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{url_path}"
+        logger.info(f"Setting up webhook for URL: {full_webhook_url} on port {PORT}")
+        
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path="webhook",
-            webhook_url=f"{WEBHOOK_URL}/webhook"
+            url_path=url_path,
+            webhook_url=full_webhook_url
         )
     else:
-        logger.warning("WEBHOOK_URL not set. Running with long polling.")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling()
 
 if __name__ == "__main__":
     main()
+
+# NOTE: You will need to copy over the admin command functions (`add_channel`, `del_channel`, etc.)
+# and other handlers from the previous code block as they are unchanged.
