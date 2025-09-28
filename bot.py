@@ -10,14 +10,13 @@ from telegram.ext import (
     ConversationHandler
 )
 from telegram.error import TelegramError
-from paramiko.ssh_exception import SSHException # Import the specific exception
+from paramiko.ssh_exception import SSHException
 
-# --- Custom Exceptions for Clearer Error Messages ---
+# --- Custom Exceptions ---
 class ConnectionTimeoutError(Exception):
-    """Custom exception for SFTP connection timeouts."""
     pass
 
-# --- Configuration and Setup ---
+# --- Configuration ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", "8000"))
@@ -32,7 +31,7 @@ AWAITING_FORWARD = range(1)
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Helper and Channel Functions (unchanged) ---
+# --- Helper and Channel Functions ---
 def load_channels():
     try:
         with open(CHANNELS_FILE, "r") as f: return json.load(f)
@@ -41,7 +40,7 @@ def load_channels():
 def save_channels(channels):
     with open(CHANNELS_FILE, "w") as f: json.dump(channels, f, indent=4)
 
-# --- Upload Function (UPDATED WITH SPECIFIC TIMEOUT HANDLING) ---
+# --- Upload Function (UPDATED WITH CORRECT PORT) ---
 def upload_file_with_progress(local_path: str, remote_filename: str, callback_func) -> str:
     missing_vars = [var for var, val in {"FTP_HOST": SFTP_HOST, "FTP_USER": SFTP_USER, "FTP_PASS": SFTP_PASS, "FTP_PATH": SFTP_PATH, "PUBLIC_URL_BASE": PUBLIC_URL_BASE}.items() if not val]
     if missing_vars:
@@ -51,14 +50,15 @@ def upload_file_with_progress(local_path: str, remote_filename: str, callback_fu
     remote_filepath = f"{SFTP_PATH.rstrip('/')}/{remote_filename}"
     
     try:
-        with pysftp.Connection(host=SFTP_HOST, username=SFTP_USER, password=SFTP_PASS, port=22, cnopts=cnopts) as sftp:
+        # *** THE FIX IS HERE: Using port 65002 ***
+        logger.info(f"Connecting to SFTP host: {SFTP_HOST} on port 65002")
+        with pysftp.Connection(host=SFTP_HOST, username=SFTP_USER, password=SFTP_PASS, port=65002, cnopts=cnopts) as sftp:
             sftp.put(local_path, remote_filepath, callback=callback_func)
         return f"{PUBLIC_URL_BASE.rstrip('/')}/{remote_filename}"
     
     except pysftp.AuthenticationException:
         raise ConnectionRefusedError("Authentication failed. Check FTP_USER and FTP_PASS.")
     
-    # --- THIS IS THE NEW PART ---
     except SSHException as e:
         if "Connection timed out" in str(e):
             logger.error("SFTP Connection Timed Out. This is likely a firewall issue.")
@@ -66,24 +66,20 @@ def upload_file_with_progress(local_path: str, remote_filename: str, callback_fu
                 "The connection to your hosting server timed out.\n\n"
                 "**This is almost always a firewall problem.**\n\n"
                 "**Solution:**\n"
-                "1. Go to your Hostinger hPanel.\n"
-                "2. Go to **Advanced -> SSH Access** and ensure it is **Enabled**.\n"
-                "3. Go to **Advanced -> IP Manager** and whitelist all of Render's outbound IP addresses. You can find the list here:\n"
+                "1. In your Hostinger hPanel, go to **Advanced -> SSH Access** and ensure it is **Enabled**.\n"
+                "2. Go to **Advanced -> IP Manager** and whitelist all of Render's outbound IP addresses. You can find the list here:\n"
                 "https://render.com/docs/static-outbound-ip-addresses"
             )
         else:
-            logger.error(f"An unexpected SSH error occurred: {e}", exc_info=True)
-            raise e
+            logger.error(f"An unexpected SSH error occurred: {e}", exc_info=True); raise e
     
     except Exception as e:
-        logger.error(f"An unexpected SFTP error occurred: {e}", exc_info=True)
-        raise e
+        logger.error(f"An unexpected SFTP error occurred: {e}", exc_info=True); raise e
 
 # --- Command Handlers (unchanged) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(f"Hi {update.effective_user.mention_html()}! Send a file (under 20MB).")
 async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Same as before)
     if update.effective_user.id != OWNER_ID: return
     status_list = [f"{k}: {'✅ Set' if v else '❌ MISSING!'}" for k, v in {
         "BOT_TOKEN": BOT_TOKEN, "WEBHOOK_URL": WEBHOOK_URL, "OWNER_ID": OWNER_ID, "FTP_HOST": SFTP_HOST,
@@ -91,12 +87,10 @@ async def check_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }.items()]
     await update.message.reply_text("Environment Variable Status:\n" + "\n".join(status_list))
 async def add_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Same as before)
     if update.effective_user.id != OWNER_ID: return ConversationHandler.END
     await update.message.reply_text("To add a channel:\n1. Make me an admin there.\n2. Forward a message from the channel to me.\n\nSend /cancel to abort.")
     return AWAITING_FORWARD
 async def receive_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Same as before)
     message = update.message
     if not message.forward_origin or message.forward_origin.type != 'channel':
         await message.reply_text("That is not a valid forwarded message from a channel. Please try again or /cancel."); return AWAITING_FORWARD
@@ -115,7 +109,6 @@ async def receive_forwarded_message(update: Update, context: ContextTypes.DEFAUL
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operation cancelled."); return ConversationHandler.END
 async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Same as before)
     if update.effective_user.id != OWNER_ID: return
     if not context.args: await update.message.reply_text("Usage: /delchannel @channel_username_or_id"); return
     channel_to_delete = context.args[0]
@@ -124,16 +117,13 @@ async def del_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channels.remove(channel_to_delete); save_channels(channels); await update.message.reply_text(f"Removed '{channel_to_delete}'.")
     else: await update.message.reply_text(f"'{channel_to_delete}' not found.")
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Same as before)
     if update.effective_user.id != OWNER_ID: return
     channels = load_channels()
     if channels: await update.message.reply_text("Required channels:\n" + "\n".join(channels))
     else: await update.message.reply_text("No channels required.")
 
-# --- Media Handler (UPDATED WITH NEW EXCEPTION HANDLING) ---
+# --- Media Handler ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Force-subscribe logic unchanged)
-    # ...
     message = update.message
     file, file_name = (message.video, message.video.file_name or f"video_{int(time.time())}.mp4") if message.video else (message.document, message.document.file_name or f"file_{int(time.time())}.bin")
     if not file: return
@@ -143,8 +133,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_update_time = [0]
 
     async def progress_callback(sent, total):
-        # (Progress bar logic unchanged)
-        # ...
         current_time = time.time()
         if current_time - last_update_time[0] < 1.5: return
         percentage = int((sent / total) * 100)
@@ -167,7 +155,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await processing_msg.edit_text(f"✅ Your direct link is ready:\n\n{direct_link}", parse_mode=None)
 
-    # --- THIS IS THE NEW PART ---
     except ConnectionTimeoutError as cte:
         await processing_msg.edit_text(f"🚫 **Connection Error**\n\n{cte}")
     except (ValueError, ConnectionRefusedError) as e:
@@ -179,16 +166,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(temp_file_path): os.remove(temp_file_path)
 
 async def check_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (unchanged)
-    # ...
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     await query.edit_message.reply_text("Thanks! Please send your file again.")
 
-# --- Bot Initialization (unchanged) ---
+# --- Bot Initialization ---
 async def post_init(application: Application):
-    # (unchanged)
-    # ...
     await application.bot.set_my_commands([
         BotCommand("start", "Start the bot"), BotCommand("checkenv", "Check variables (Admin)"),
         BotCommand("addchannel", "Add channel (Admin)"), BotCommand("delchannel", "Remove channel (Admin)"),
@@ -197,8 +179,6 @@ async def post_init(application: Application):
     logger.info("Custom bot commands set.")
 
 def main():
-    # (unchanged)
-    # ...
     if not BOT_TOKEN or not OWNER_ID:
         logger.critical("FATAL: BOT_TOKEN or OWNER_ID not set."); return
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
