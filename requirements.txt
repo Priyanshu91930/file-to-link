@@ -1,0 +1,3 @@
+python-telegram-bot==21.0.1
+# Add your cloud storage library here, e.g., for AWS S3:
+# boto3
