@@ -40,7 +40,7 @@ def load_channels():
 def save_channels(channels):
     with open(CHANNELS_FILE, "w") as f: json.dump(channels, f, indent=4)
 
-# --- Upload Function (UPDATED WITH CORRECT PORT) ---
+# --- Upload Function ---
 def upload_file_with_progress(local_path: str, remote_filename: str, callback_func) -> str:
     missing_vars = [var for var, val in {"FTP_HOST": SFTP_HOST, "FTP_USER": SFTP_USER, "FTP_PASS": SFTP_PASS, "FTP_PATH": SFTP_PATH, "PUBLIC_URL_BASE": PUBLIC_URL_BASE}.items() if not val]
     if missing_vars:
@@ -50,7 +50,6 @@ def upload_file_with_progress(local_path: str, remote_filename: str, callback_fu
     remote_filepath = f"{SFTP_PATH.rstrip('/')}/{remote_filename}"
     
     try:
-        # *** THE FIX IS HERE: Using port 65002 ***
         logger.info(f"Connecting to SFTP host: {SFTP_HOST} on port 65002")
         with pysftp.Connection(host=SFTP_HOST, username=SFTP_USER, password=SFTP_PASS, port=65002, cnopts=cnopts) as sftp:
             sftp.put(local_path, remote_filepath, callback=callback_func)
@@ -122,48 +121,99 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if channels: await update.message.reply_text("Required channels:\n" + "\n".join(channels))
     else: await update.message.reply_text("No channels required.")
 
-# --- Media Handler ---
+# --- Media Handler (CORRECTED & MORE ROBUST) ---
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    file, file_name = (message.video, message.video.file_name or f"video_{int(time.time())}.mp4") if message.video else (message.document, message.document.file_name or f"file_{int(time.time())}.bin")
-    if not file: return
+    # Determine the file object and a default file name
+    if message.video:
+        file = message.video
+        file_name = file.file_name or f"video_{int(time.time())}.mp4"
+    elif message.document:
+        file = message.document
+        file_name = file.file_name or f"file_{int(time.time())}.bin"
+    else:
+        return # Exit if it's not a video or document
 
-    processing_msg = await message.reply_text("⌛ Processing your file...")
+    processing_msg = None # Initialize to None
     temp_file_path = os.path.join("/tmp", file_name)
-    last_update_time = [0]
-
-    async def progress_callback(sent, total):
-        current_time = time.time()
-        if current_time - last_update_time[0] < 1.5: return
-        percentage = int((sent / total) * 100)
-        bar = '█' * int(percentage / 10) + '─' * (10 - int(percentage / 10))
-        try:
-            await processing_msg.edit_text(f"⬆️ Uploading...\n`[{bar}] {percentage}%`", parse_mode='Markdown')
-            last_update_time[0] = current_time
-        except Exception: pass
+    last_update_time = [0] # Use a list to make it mutable inside the callback
 
     try:
+        # Send the initial processing message
+        processing_msg = await message.reply_text("⌛ Processing your file...")
+
+        # --- Progress Callback ---
+        async def progress_callback(sent, total):
+            current_time = time.time()
+            # Throttle updates to avoid hitting Telegram API rate limits
+            if current_time - last_update_time[0] < 2:
+                return
+            percentage = int((sent / total) * 100)
+            bar = '█' * int(percentage / 10) + '─' * (10 - int(percentage / 10))
+            try:
+                # Edit the message with the progress bar
+                await processing_msg.edit_text(
+                    f"⬆️ Uploading...\n`[{bar}] {percentage}%`",
+                    parse_mode='Markdown'
+                )
+                last_update_time[0] = current_time
+            except TelegramError as e:
+                # Log if editing fails but don't stop the upload
+                logger.warning(f"Failed to update progress bar: {e}")
+            except Exception:
+                pass # Ignore other minor exceptions during progress update
+
+        # --- File Download and Upload ---
         tg_file = await file.get_file()
         await tg_file.download_to_drive(temp_file_path)
-        
+
         def sync_progress_callback(sent, total):
+            # Create a task to run the async progress callback from the sync thread
             context.application.create_task(progress_callback(sent, total))
-        
+
+        # Run the blocking upload function in a separate thread
         direct_link = await asyncio.to_thread(
             upload_file_with_progress, temp_file_path, file_name, sync_progress_callback
         )
         
-        await processing_msg.edit_text(f"✅ Your direct link is ready:\n\n{direct_link}", parse_mode=None)
+        # --- *** FIX STARTS HERE *** ---
+        
+        logger.info(f"Successfully generated direct link: {direct_link}")
+        
+        final_message_text = f"✅ Your direct link is ready:\n\n`{direct_link}`"
+        
+        try:
+            # Try to edit the original "Processing" message
+            await processing_msg.edit_text(final_message_text, parse_mode='Markdown')
+        except TelegramError as e:
+            # If editing fails (e.g., message is too old, permissions error)
+            logger.error(f"Failed to edit message, sending link as a new message. Error: {e}")
+            # Send the link as a new reply instead
+            await message.reply_text(final_message_text, parse_mode='Markdown')
+        
+        # --- *** FIX ENDS HERE *** ---
 
     except ConnectionTimeoutError as cte:
-        await processing_msg.edit_text(f"🚫 **Connection Error**\n\n{cte}")
+        error_message = f"🚫 **Connection Error**\n\n{cte}"
+        if processing_msg: await processing_msg.edit_text(error_message, parse_mode='Markdown')
+        else: await message.reply_text(error_message, parse_mode='Markdown')
+            
     except (ValueError, ConnectionRefusedError) as e:
-        await processing_msg.edit_text(f"🚫 **Configuration Error**\n\n{e}")
+        error_message = f"🚫 **Configuration Error**\n\n{e}"
+        if processing_msg: await processing_msg.edit_text(error_message)
+        else: await message.reply_text(error_message)
+
     except Exception as e:
-        logger.error(f"Error processing file {file_name}: {e}", exc_info=True)
-        await processing_msg.edit_text("An unexpected error occurred. Please check the logs.")
+        logger.error(f"An unexpected error occurred while processing file {file_name}: {e}", exc_info=True)
+        error_message = "An unexpected error occurred. Please check the logs."
+        if processing_msg: await processing_msg.edit_text(error_message)
+        else: await message.reply_text(error_message)
+
     finally:
-        if os.path.exists(temp_file_path): os.remove(temp_file_path)
+        # Clean up the downloaded file
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
 
 async def check_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
